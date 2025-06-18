@@ -15,7 +15,7 @@ Monitors water level in cylindrical tanks using an A02YYUW ultrasonic sensor. Fe
 
 ## Hardware
 
-- Seeed Studio XIAO ESP32-C6
+- ESP32-C6 (Seeed Studio XIAO)
 - A02YYUW ultrasonic distance sensor (UART)
 - SSD1306 128x64 OLED display (I2C)
 - Neopixel RGB LED (WS2812 or compatible)
