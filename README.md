@@ -15,7 +15,7 @@ Monitors water level in cylindrical tanks using an A02YYUW ultrasonic sensor. Fe
 
 ## Hardware
 
-- Seeed Studio XIAO ESP32-C6 (ESP32-C6 with onboard regulator)
+- Seeed Studio XIAO ESP32-C6
 - A02YYUW ultrasonic distance sensor (UART)
 - SSD1306 128x64 OLED display (I2C)
 - Neopixel RGB LED (WS2812 or compatible)
@@ -34,7 +34,7 @@ Monitors water level in cylindrical tanks using an A02YYUW ultrasonic sensor. Fe
 | Calibrate Button 1     | GPIO10       | Set offset height          |
 | Calibrate Button 2     | GPIO11       | Reset offset / test alert  |
 
-> Sensor powered at 5V. All other components powered at 3.3V via onboard regulator.
+> Sensor powered at 5V. All other components powered at 3.3V.
 
 ## Getting Started
 
