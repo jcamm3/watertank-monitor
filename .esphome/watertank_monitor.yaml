@@ -1,0 +1,919 @@
+#**************************************************************
+#  Project:           Watertank Monitor
+#  Device/Board:      ESP32-C6 (Seeed Studio XIAO ESP32-C6)
+#  Version:           1.6.0
+#  Author:            John Camm
+#  Last Updated:      2025-06-17
+#**************************************************************
+#  DESCRIPTION
+#    Monitors cylindrical water tank with A02YYUW ultrasonic sensor,
+#    runtime tank geometry config, OLED/web UI, field calibration via
+#    buttons/web, low-level buzzer alert (switchable), LED night mode,
+#    and OLED screen control (timeout + override switch).
+#    Runs on Seeed Studio ESP32-C6 with 5V barrel jack & onboard 3.3V reg.
+#**************************************************************
+#  SENSOR & FEATURE SPECIFICATIONS
+#    - [A02YYUW Ultrasonic Sensor]
+#      - Range: 3–450 cm; ±1% typical
+#      - Output: UART (9600 baud)
+#      - Voltage: 5V, IP67 sealed
+#    - [SSD1306 OLED Display]
+#      - 128x64, I²C (GPIO22/23), 3.3V powered
+#    - [Active Buzzer]
+#      - Alert on low level, GPIO19, Home Assistant switch
+#**************************************************************
+#  GPIO PIN ASSIGNMENTS
+#  ---------------------------------------------------------------------------
+#    GPIO    |   Function / Peripheral
+#  ----------|---------------------------------------------------------------
+#    GPIO2   |   Blue LED output
+#    GPIO3   |   WiFi Enable (antenna setup)
+#    GPIO4   |   Green LED output
+#    GPIO5   |   Yellow LED 2
+#    GPIO6   |   Yellow LED 1
+#    GPIO7   |   Red LED output
+#    GPIO14  |   WiFi Antenna Config
+#    GPIO15  |   Onboard Status LED (inverted)
+#    GPIO16  |   UART TX (Ultrasonic)
+#    GPIO17  |   UART RX (Ultrasonic)
+#    GPIO18  |   Calibrate Empty Button (input, pullup, inverted)
+#    GPIO19  |   Buzzer Output (PWM)
+#    GPIO20  |   Calibrate Full Button (input, pullup, inverted)
+#    GPIO22  |   I²C SDA (OLED)
+#    GPIO23  |   I²C SCL (OLED)
+#  ---------------------------------------------------------------------------
+#**************************************************************
+#  USAGE NOTES
+#    - Wire A02YYUW to 4-pin terminal: VCC (5V), GND, TX (to ESP RX), RX (to ESP TX)
+#    - Adjust tank geometry via web UI; calibrate with physical/web buttons.
+#    - "Night Mode (Buzzer Sleep)" disables audible alerts.
+#    - "Night Mode (LED Sleep)" disables all status LEDs during a configurable window.
+#    - OLED screen can be automatically turned off via timeout slider or forced on.
+#**************************************************************
+#  CHANGELOG
+#    [v1.6.0] - 2025-06-17
+#      - Set tank_state text_sensor to internal: true to reduce HA entity clutter.
+#        This preserves its use for OLED display logic and automation purposes.
+#    [v1.5.0] - 2025-06-17
+#      - Refactored tank-level LED logic into standalone script (update_tank_leds).
+#      - Preserved blue LED auto logic inside LED script for clarity and control.
+#      - Cleaned up tank_level sensor’s on_value to only trigger script execution.
+#      - Improved maintainability and modularity of LED control logic.
+#    [v1.4.0] - 2025-06-16
+#      - Added LED Night Mode time window slider (start/end hour).
+#      - Refactored LED logic to respect user-defined sleep window.
+#      - Blue LED now blinks during alerts only if auto mode is ON.
+#      - Added adjustable blink speed for Blue LED.
+#      - Improved buzzer alert logic and sleep suppression.
+#      - Standardized LED override protections across all logic blocks.
+#    [v1.3.0] - 2025-06-12
+#      - Added LED & Buzzer Night Modes (switchable).
+#    [v1.2.0] - 2025-06-07
+#      - Added active buzzer (alert pattern, switchable).
+#    [v1.1.0] - 2025-06-07
+#      - Physical calibration buttons.
+#    [v1.0.0] - 2025-06-06
+#      - Initial release: ultrasonic tank monitor, web/OLED UI, runtime calibration.
+#**************************************************************
+
+# === ESPHome Core Configuration ===
+# Basic device identity and initial boot setup
+esphome:
+  name: "watertank"
+  friendly_name: water tank monitor
+  comment: Water Level and Temperature (xaio esp32-c6)
+  platformio_options:
+    board_upload.maximum_size: 4194304
+  on_boot:
+    priority: 250
+    then:
+      - lambda: |-
+          // Set up GPIOs for external antenna switch
+          ESP_LOGD("custom", "External antenna switch");
+          gpio_reset_pin(GPIO_NUM_3);
+          gpio_set_direction(GPIO_NUM_3, GPIO_MODE_OUTPUT);
+          gpio_set_level(GPIO_NUM_3, 0);
+          vTaskDelay(pdMS_TO_TICKS(100));
+          gpio_reset_pin(GPIO_NUM_14);
+          gpio_set_direction(GPIO_NUM_14, GPIO_MODE_OUTPUT);
+          gpio_set_level(GPIO_NUM_14, 1);
+
+# === Hardware Details ===
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+# === Logging Configuration ===
+logger:
+  level: WARN
+  hardware_uart: USB_SERIAL_JTAG
+
+# === Remote API and OTA Update Support ===
+api:
+  encryption:
+    key: "C+mVK/AVTxAyxpssh0S+0y1us4WUzZU9iWqHIj+KG64="
+ota:
+  - platform: esphome
+    password: "0933820609757389a21a977d9f8445e4"
+
+# === Wifi and Fallback Hotspot Configuration ===
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "water-tank"
+    password: "saintmoor"
+
+# === Captive Portal ===
+captive_portal:
+
+# === Web Server ===
+web_server:
+  version: 3
+  auth:
+    username: saintmoor
+    password: saintmoor
+  sorting_groups:
+    - id: tank_values
+      name: "Water Tank"
+      sorting_weight: -20
+    - id: tank_status
+      name: "Tank Status"
+      sorting_weight: -15
+    - id: config_settings
+      name: "Config"
+      sorting_weight: -10
+    - id: status_settings
+      name: "Status"
+      sorting_weight: -5
+
+# === Time Configuration ===
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+    servers:
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+     - 2.pool.ntp.org
+
+# === Global Variables ===
+globals:
+  - id: tank_radius_in
+    type: float
+    initial_value: '26'
+  - id: tank_length_in
+    type: float
+    initial_value: '120'
+  - id: tank_max_fill_height_in
+    type: float
+    initial_value: '49'
+  - id: empty_distance_in
+    type: float
+    initial_value: '52'
+  - id: full_distance_in
+    type: float
+    initial_value: '3'
+  - id: volume_drop_rate_gal
+    type: float
+    initial_value: '0'
+  - id: low_water_threshold
+    type: float
+    initial_value: '10'
+  - id: high_water_threshold
+    type: float
+    initial_value: '98'
+  - id: fast_drain_threshold_gal
+    type: float
+    initial_value: '50'
+  - id: alert_blink_interval
+    type: float
+    initial_value: '0.50'
+  - id: blue_led_is_on
+    type: bool
+    initial_value: 'true'
+  - id: led_sleep_start_minute
+    type: int
+    initial_value: '1320'  # 22:00 = 22 * 60
+  - id: led_sleep_end_minute
+    type: int
+    initial_value: '390'   # 6:30 = 6 * 60 + 30
+  - id: is_led_sleep_time
+    type: std::function<bool()>
+    restore_value: no
+    initial_value: '[]() -> bool {
+      auto time = id(sntp_time).now();
+      int now = time.hour * 60 + time.minute;
+      int start = id(led_sleep_start_minute);
+      int end = id(led_sleep_end_minute);
+      return (start < end) ? (now >= start && now < end) : (now >= start || now < end);
+    }'
+
+# === Tank Geometry UI Controls ===
+number:
+  - platform: template
+    id: tank_radius_number
+    icon: mdi:radius
+    name: "Tank Radius (in)"
+    min_value: 10
+    max_value: 30
+    step: 0.1
+    initial_value: 26
+    internal: true
+    set_action:
+      - lambda: |-
+          id(tank_radius_in) = x;
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    id: tank_length_number
+    icon: mdi:tape-measure
+    name: "Tank Length (in)"
+    min_value: 60
+    max_value: 180
+    step: 1
+    initial_value: 120
+    internal: true
+    set_action:
+      - lambda: |-
+          id(tank_length_in) = x;
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Low Water Alert Threshold (%)"
+    id: low_water_slider
+    icon: mdi:wave
+    min_value: 1
+    max_value: 50
+    step: 1
+    initial_value: 10
+    set_action:
+      - lambda: |-
+          id(low_water_threshold) = x;
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "High Water Alert Threshold (%)"
+    id: high_water_slider
+    icon: mdi:waves
+    min_value: 80
+    max_value: 100
+    step: 1
+    initial_value: 98
+    set_action:
+      - lambda: |-
+          id(high_water_threshold) = x;
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Fast Drain Trigger (gal/5min)"
+    id: fast_drain_slider
+    icon: mdi:water-remove
+    min_value: 10
+    max_value: 200
+    step: 5
+    initial_value: 50
+    set_action:
+      - lambda: |-
+          id(fast_drain_threshold_gal) = x;
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    id: blue_led_blink_speed
+    name: "Blue LED Blink Speed"
+    icon: mdi:led-strip-variant
+    unit_of_measurement: "s"
+    min_value: 0.1
+    max_value: 2.0
+    step: 0.1
+    initial_value: 0.5
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(alert_blink_interval) = x;
+    web_server:
+      sorting_group_id: config_settings
+
+# === i2c Sensors and Display === 
+i2c:
+  sda: GPIO22
+  scl: GPIO23
+  scan: true
+  id: bus_a
+
+# UART for ultrasonic sensor
+uart:
+  tx_pin: GPIO16
+  rx_pin: GPIO17
+  baud_rate: 9600
+
+# === Binary Sensors ===
+binary_sensor:
+  - platform: template
+    id: low_water_alert
+    icon: mdi:alert
+    name: "Low Water Alert"
+    lambda: |-
+      return (id(tank_level).state < id(low_water_threshold));
+    device_class: problem
+    web_server:
+      sorting_group_id: tank_status
+  - platform: template
+    id: high_water_alert
+    icon: mdi:alert
+    name: "High Water Alert"
+    lambda: |-
+      return (id(tank_level).state > id(high_water_threshold));
+    device_class: safety
+    web_server:
+      sorting_group_id: tank_status
+  - platform: template
+    id: fast_drain_alert
+    icon: mdi:alert
+    name: "Fast Drain Alert"
+    lambda: |-
+      return (id(volume_drop_rate_gal) > id(fast_drain_threshold_gal));
+    device_class: safety
+    web_server:
+      sorting_group_id: tank_status
+  - platform: status
+    name: "Status"
+    icon: "mdi:state-machine"
+  - platform: gpio
+    id: calibrate_empty_physical
+    name: "Calibrate Empty Button"
+    icon: mdi:cup-off
+    pin:
+      number: GPIO18
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - button.press: calibrate_empty_button
+    web_server:
+      sorting_group_id: config_settings
+  - platform: gpio
+    id: calibrate_full_physical
+    name: "Calibrate Full Button"
+    icon: mdi:cup-water
+    pin:
+      number: GPIO20
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - button.press: calibrate_full_button
+    web_server:
+      sorting_group_id: config_settings
+
+# === Buttons ===
+button:
+  - platform: template
+    id: calibrate_empty_button
+    name: "Calibrate Empty"
+    icon: mdi:cup-off
+    on_press:
+      then:
+        - lambda: |-
+            id(empty_distance_in) = id(distance_in).state;
+            ESP_LOGI("calibrate", "Tank EMPTY calibration set to %.1f in", id(empty_distance_in));
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    id: calibrate_full_button
+    name: "Calibrate Full"
+    icon: mdi:cup-water
+    on_press:
+      then:
+        - lambda: |-
+            id(full_distance_in) = id(distance_in).state;
+            ESP_LOGI("calibrate", "Tank FULL calibration set to %.1f in", id(full_distance_in));
+    web_server:
+      sorting_group_id: config_settings
+
+# === GPIO Control ===
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: led_blue
+  - platform: gpio
+    pin: GPIO4
+    id: led_green
+  - platform: gpio
+    pin: GPIO5
+    id: led_yellow_2
+  - platform: gpio
+    pin: GPIO6
+    id: led_yellow_1
+  - platform: gpio
+    pin: GPIO7
+    id: led_red
+  - platform: ledc
+    pin: GPIO19
+    id: buzzer_pwm
+
+# === Intervals ===
+interval:
+  - interval: 10s
+    then:
+      - display.page.show_next: oled_display
+      - component.update: oled_display
+
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: 'return (!id(buzzer_sleep_mode).state) && (id(low_water_alert).state || id(high_water_alert).state || id(fast_drain_alert).state);'
+          then:
+            - script.execute: buzzer_alert_beep
+  - interval: 60s
+    then:
+      - lambda: |-
+          bool led_sleep = id(led_night_mode).state;
+          bool buzzer_sleep = id(buzzer_sleep_mode).state;
+          auto time = id(sntp_time).now();
+          bool is_sleep_time = id(is_led_sleep_time)();
+          if (led_sleep && is_sleep_time) {
+            id(led_red).turn_off();
+            id(led_yellow_1).turn_off();
+            id(led_yellow_2).turn_off();
+            id(led_green).turn_off();
+            id(blue_led_switch).turn_off();
+          }
+          if (buzzer_sleep && is_sleep_time) {
+            id(buzzer_out).turn_off();  // ensure buzzer is silent
+          }
+  - interval: 200ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(blue_led_alert_mode).state &&
+                     (id(low_water_alert).state || id(high_water_alert).state || id(fast_drain_alert).state);
+          then:
+            - lambda: |-
+                static float elapsed = 0.0f;
+                elapsed += 0.2f;
+                float blink_interval = id(alert_blink_interval);
+                if (blink_interval <= 0.0f) blink_interval = 0.5f;
+                if (elapsed >= blink_interval) {
+                  elapsed = 0.0f;
+                  id(blue_led_is_on) = !id(blue_led_is_on);
+                  if (id(blue_led_is_on)) {
+                    id(blue_led_switch).turn_on();
+                  } else {
+                    id(blue_led_switch).turn_off();
+                  }
+                }
+
+# ==== OLED Configuration ===
+font:
+  - file: "gfonts://Roboto"
+    id: roboto_medium
+    size: 15
+  - file: 'fonts/BebasNeue-Regular.ttf'
+    id: bebasneue_large
+    size: 48
+  - file: 'fonts/arial.ttf'
+    id: arial_medium
+    size: 14
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    i2c_id: bus_a
+    id: oled_display
+    auto_clear_enabled: true
+    show_test_card: false
+    pages:
+      - id: page1 
+        lambda: |-
+          // it.printf(X, Y,.. (X (Row) and Y (Column)) 
+          // Print "Water Tank" in top center.
+          it.printf(it.get_width() / 2, 8, id(roboto_medium), TextAlign::TOP_CENTER, "Water Tank");
+          // Print time in HH:MM format
+          it.strftime(0, 60, id(bebasneue_large), TextAlign::BASELINE_LEFT, "%H:%M", id(sntp_time).now());
+          // Print Distance to Water
+          if (id(distance_in).has_state()) {
+          it.printf(127, 23, id(arial_medium), TextAlign::TOP_RIGHT, "%.0f in", id(distance_in).state);
+          }
+          // Print Tank Water Height
+          if (id(tank_water_height).has_state()) {
+          it.printf(127, 60, id(arial_medium), TextAlign::BASELINE_RIGHT, "%.0f in", id(tank_water_height).state);
+          }
+      - id: page2 
+        lambda: |-
+          // Print "Tank Volume" in top center.
+          it.printf(it.get_width() / 2, 8, id(roboto_medium), TextAlign::TOP_CENTER, "Volume (gal)");
+          // Print Tank Volume
+          if (id(tank_volume_gal).has_state()) {
+          it.printf(it.get_width() / 2, it.get_height() - 4, id(bebasneue_large), TextAlign::BASELINE_CENTER, "%.0f", id(tank_volume_gal).state);
+          }
+      - id: page3
+        lambda: |-
+          // Print "Tank Level %" in top center.
+          it.printf(it.get_width() / 2, 8, id(roboto_medium), TextAlign::TOP_CENTER, "Level");
+          // Print Tank Level %
+          if (id(tank_level).has_state()) {
+          it.printf(it.get_width() / 2, it.get_height() - 4, id(bebasneue_large), TextAlign::BASELINE_CENTER, "%.0f%%", id(tank_level).state);
+          }
+      - id: page4
+        lambda: |-
+          // Print "Tank Status" in top center.
+          it.printf(it.get_width() / 2, 8, id(roboto_medium), TextAlign::TOP_CENTER, "Status");
+          // Print Tank Status
+          if (id(tank_state).has_state()) {
+          it.printf(it.get_width() / 2, it.get_height() - 4, id(bebasneue_large), TextAlign::BASELINE_CENTER, "%s", id(tank_state).state.c_str());
+          }
+
+# === Scripts ===
+script:
+  - id: update_tank_leds
+    then:
+      - lambda: |-
+          float percent = id(tank_level).state;
+          if (percent < 0) return;
+          bool sleep_enabled = id(led_night_mode).state;
+          bool is_sleep_time = id(is_led_sleep_time)();
+          bool blue_auto = id(blue_led_alert_mode).state;
+          if (!(sleep_enabled && is_sleep_time)) {
+            id(led_red).turn_on();
+            if (percent >= 25.0) {
+              id(led_yellow_1).turn_on();
+            } else {
+              id(led_yellow_1).turn_off();
+            }
+            if (percent >= 50.0) {
+              id(led_yellow_2).turn_on();
+            } else {
+              id(led_yellow_2).turn_off();
+            }
+            if (percent >= 75.0) {
+              id(led_green).turn_on();
+            } else {
+              id(led_green).turn_off();
+            }
+          }
+          if (blue_auto) {
+            if (sleep_enabled && is_sleep_time) {
+              id(blue_led_switch).turn_off();
+            } else if (!(id(low_water_alert).state || id(high_water_alert).state || id(fast_drain_alert).state)) {
+              id(blue_led_switch).turn_on();  // steady blue
+            }
+          }
+  - id: buzzer_alert_beep
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(buzzer_sleep_mode).state) return;  // Buzzer disabled
+          if (!(id(low_water_alert).state || id(high_water_alert).state || id(fast_drain_alert).state)) {
+            return;  // No alerts active
+          }
+      - script.execute: melody_1
+  - id: play_selected_melody
+    then:
+      - lambda: |-
+          auto melody = id(melody_selector).state;
+          ESP_LOGI("melody", "Selected melody: %s", melody.c_str());
+          if (melody == "Melody 1") {
+            id(melody_1).execute();
+          } else if (melody == "Melody 2") {
+            id(melody_2).execute();
+          } else {
+            ESP_LOGW("melody", "No matching melody found.");
+          }
+  - id: melody_1
+    then:
+      - lambda: |-
+          int freqs[] = {261, 294, 329, 349, 391, 440, 494, 523};  // C D E F G A B c
+          int tempo = 200;
+          auto buzzer = id(buzzer_pwm);
+
+          for (int i = 0; i < 8; i++) {
+            buzzer->set_frequency(freqs[i]);
+            buzzer->set_level(0.5f);
+            delay(tempo);
+            buzzer->set_level(0.0f);
+            delay(tempo / 2);
+          }
+  - id: melody_2
+    then:
+      - lambda: |-
+          int alarm_freqs[] = {880, 523};  // A5 and C5
+          int repeat_count = 6;            // 6 tone pairs
+          int tone_duration = 200;         // ms
+          int pause_duration = 100;        // ms
+          auto buzzer = id(buzzer_pwm);
+          for (int i = 0; i < repeat_count; i++) {
+            for (int j = 0; j < 2; j++) {
+              buzzer->set_frequency(alarm_freqs[j]);
+              buzzer->set_level(0.5f);
+              delay(tone_duration);
+              buzzer->set_level(0.0f);
+              delay(pause_duration);
+            }
+          }
+
+# === Selectors ===
+select:
+  - platform: template
+    name: "Melody Selector"
+    id: melody_selector
+    options:
+      - "Melody 1"
+      - "Melody 2"
+    initial_option: "Melody 1"
+    optimistic: true
+    internal: true
+
+# === Sensors ===
+sensor:
+  - platform: a02yyuw
+    id: distance_in
+    icon: mdi:arrow-expand-vertical
+    name: "Distance to Water"
+    unit_of_measurement: "in"
+    accuracy_decimals: 0
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+      - multiply: 0.0393701  # cm ➝ in
+    web_server:
+      sorting_group_id: tank_values
+  - platform: template
+    id: tank_water_height
+    icon: mdi:arrow-expand-vertical
+    name: "Water Height"
+    unit_of_measurement: "in"
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      float d = id(distance_in).state;
+      float h = id(empty_distance_in) - d;
+      float max_h = id(empty_distance_in) - id(full_distance_in);
+      if (h < 0) return 0;
+      if (h > max_h) return max_h;
+      return h;
+    filters:
+      - filter_out: nan
+    web_server:
+      sorting_group_id: tank_values
+  - platform: template
+    id: tank_volume_gal
+    icon: mdi:water
+    name: "Tank Volume"
+    unit_of_measurement: "gal"
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      float h = id(tank_water_height).state;
+      float r = id(tank_radius_in);
+      float l = id(tank_length_in);
+      if (h <= 0) return 0;
+      if (h >= id(tank_max_fill_height_in)) return id(tank_capacity_gal).state;
+      float theta = acos((r - h) / r);
+      float segment_area = r * r * (theta - sin(2 * theta) / 2);
+      float volume_cubic_inches = segment_area * l;
+      return volume_cubic_inches / 231;
+    filters:
+      - filter_out: nan
+    web_server:
+      sorting_group_id: tank_values
+  - platform: template
+    id: tank_capacity_gal
+    icon: mdi:water
+    name: "Tank Capacity"
+    unit_of_measurement: "gal"
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      float r = id(tank_radius_in);
+      float l = id(tank_length_in);
+      float max_h = id(empty_distance_in) - id(full_distance_in);
+      if (r <= 0 || max_h <= 0) return 0;
+      float theta = acos((r - max_h) / r);
+      float segment_area = r * r * (theta - sin(2 * theta) / 2.0);
+      float volume_cubic_inches = segment_area * l;
+      return volume_cubic_inches / 231.0;
+    web_server:
+      sorting_group_id: tank_values
+  - platform: template
+    id: tank_level
+    icon: mdi:water
+    name: "Tank Full (%)"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      return (id(tank_volume_gal).state / id(tank_capacity_gal).state) * 100;
+    filters:
+      - filter_out: nan
+    on_value:
+      then:
+        - script.execute: update_tank_leds
+    web_server:
+      sorting_group_id: tank_values
+# === Other Sensors ===
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_s
+    update_interval: 5s
+  - platform: internal_temperature
+    name: "Internal Temperature"
+    id: "internal_temperature_f"
+    unit_of_measurement: "°F"
+    icon: "mdi:temperature-fahrenheit"
+    accuracy_decimals: 0
+    device_class: "temperature"
+    state_class: "measurement"
+    filters:
+      - lambda: return x * (9.0/5.0) + 32.0;
+      - filter_out: nan
+
+# === Switches ===
+switch:
+  - platform: restart
+    icon: mdi:reload-alert
+    name: "Restart"
+  - platform: gpio
+    pin: GPIO15
+    id: onboard_led
+    name: "Status LED"
+    icon: "mdi:led-off"
+    inverted: yes
+    restore_mode: ALWAYS_ON
+  - platform: output
+    name: "Blue LED"
+    id: blue_led_switch
+    icon: "mdi:led-off"
+    output: led_blue
+    restore_mode: ALWAYS_ON
+    internal: true
+  - platform: template
+    name: "Blue LED Alert Mode"
+    id: blue_led_alert_mode
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: mdi:autorenew
+    on_turn_on: 
+      then:
+        - switch.turn_on: blue_led_switch
+    on_turn_off: 
+      then:
+        - switch.turn_off: blue_led_switch
+    web_server:
+      sorting_group_id: config_settings
+  - platform: output
+    name: "Red LED"
+    icon: "mdi:led-off"
+    output: led_red
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: output
+    name: "Yellow LED 1"
+    icon: "mdi:led-off"
+    output: led_yellow_1
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: output
+    name: "Yellow LED 2"    
+    icon: "mdi:led-off"
+    output: led_yellow_2
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: output
+    name: "Green LED"
+    icon: "mdi:led-off"
+    output: led_green
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: template
+    name: "Buzzer"
+    id: buzzer_out
+    icon: mdi:volume-low
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - output.ledc.set_frequency:
+          id: buzzer_pwm
+          frequency: "1000Hz"
+      - output.set_level:
+          id: buzzer_pwm
+          level: 50%
+    turn_off_action:
+      - output.set_level:
+          id: buzzer_pwm
+          level: 0%
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Sleep Mode (Buzzer)"
+    id: buzzer_sleep_mode
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    icon: mdi:sleep
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Night Mode (LEDs)"
+    id: led_night_mode
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    icon: mdi:weather-night
+    web_server:
+      sorting_group_id: config_settings
+
+# === Text Sensors ===
+text_sensor:
+  - platform: template
+    name: "Calibrated Empty"
+    id: calibrate_empty_distance
+    icon: mdi:cup-off
+    lambda: |-
+      char buffer[16];
+      snprintf(buffer, sizeof(buffer), "%.1f in", id(empty_distance_in));
+      return {buffer};
+    update_interval: 15s
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Calibrated Full"
+    id: calibrate_full_distance
+    icon: mdi:cup-water
+    lambda: |-
+      char buffer[16];
+      snprintf(buffer, sizeof(buffer), "%.1f in", id(full_distance_in));
+      return {buffer};
+    update_interval: 15s
+    web_server:
+      sorting_group_id: config_settings
+  - platform: template
+    name: "Uptime (formatted)"
+    id: uptime_formatted
+    icon: "mdi:timer-outline"
+    entity_category: "diagnostic"
+    lambda: |-
+      uint32_t dur = id(uptime_s).state;
+      uint32_t dys = dur / 86400;
+      dur %= 86400;
+      uint32_t hrs = dur / 3600;
+      dur %= 3600;
+      uint32_t mnts = dur / 60;
+      dur %= 60;
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%ud %02uh %02um %02us", dys, hrs, mnts, dur);
+      return {buffer};
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      icon: "mdi:ip"
+    ssid:
+      name: "Connected SSID"
+      icon: "mdi:wifi"
+  - platform: template
+    name: " Tank Status"
+    id: tank_state
+    icon: "mdi:earth"
+    internal: true
+    lambda: |-
+      if ((id(tank_level).state > id(low_water_threshold)) && (id(tank_level).state < id(high_water_threshold)) && (id(volume_drop_rate_gal) < id(fast_drain_threshold_gal))) {
+        return {"Ok"};
+      } else if (id(tank_level).state < id(low_water_threshold)) {
+        return {"Low"};
+      } else if (id(tank_level).state > id(high_water_threshold)) {
+        return {"High"};
+      } else if (id(volume_drop_rate_gal) > id(fast_drain_threshold_gal)) {
+        return {"Draining"};
+      } else {
+        return {"Ok"};
+      }
+    update_interval: 2s
+    web_server:
+      sorting_group_id: tank_status
+  - platform: template
+    name: "Alert Summary"
+    id: tank_alert_summary
+    icon: mdi:water-alert
+    update_interval: 2s
+    lambda: |-
+      bool low = id(low_water_alert).state;
+      bool high = id(high_water_alert).state;
+      bool drain = id(fast_drain_alert).state;
+
+      if (low && high && drain) return {"LOW, HIGH & DRAIN ALERT"};
+      if (low && high) return {"LOW & HIGH ALERT"};
+      if (low && drain) return {"LOW & DRAIN ALERT"};
+      if (high && drain) return {"HIGH & DRAIN ALERT"};
+      if (low) return {"LOW WATER ALERT"};
+      if (high) return {"HIGH WATER ALERT"};
+      if (drain) return {"FAST DRAIN ALERT"};
+      return {"OK"};
+    web_server:
+      sorting_group_id: tank_status
