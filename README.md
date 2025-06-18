@@ -40,9 +40,10 @@ Monitors water level in cylindrical tanks using an A02YYUW ultrasonic sensor. Fe
 
 1. Flash the ESP32-C6 with `watertank_monitor.yaml` using ESPHome.
 2. Update `!secret` values for Wi-Fi, API, and OTA credentials.
-3. Power the device (5V barrel jack recommended).
-4. Access the web interface at `http://<device-ip>` to view water level, configure tank dimensions, or run calibration.
-5. Integrate with Home Assistant using ESPHome’s encrypted API.
+3. Save folers under .esphome directory to your local HA esphome directory.
+4. Power the device (5V barrel jack recommended).
+5. Access the web interface at `http://<device-ip>` to view water level, configure tank dimensions, or run calibration.
+6. Integrate with Home Assistant using ESPHome’s encrypted API.
 
 ## License
 
