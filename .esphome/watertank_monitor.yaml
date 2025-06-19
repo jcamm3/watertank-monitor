@@ -301,7 +301,7 @@ number:
 i2c:
   sda: GPIO22
   scl: GPIO23
-  scan: true
+  scan: false
   id: bus_a
 
 # UART for ultrasonic sensor
