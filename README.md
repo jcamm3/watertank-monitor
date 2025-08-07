@@ -4,7 +4,7 @@ Monitors water level in cylindrical tanks using an A02YYUW ultrasonic sensor. Fe
 
 ## Features
 
-- A02YYUW (sen0312) waterproof ultrasonic sensor (UART, 3–450 cm range)
+- A02YYUW (sen0311) waterproof ultrasonic sensor (UART, 3–450 cm range)
 - Runtime-configurable tank dimensions (height, diameter, offset)
 - OLED display with multi-page data view and timeout control
 - LED status indicators (color-coded + blinking for alerts)
